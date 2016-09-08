@@ -2599,7 +2599,7 @@ _lwt_AddEdge( LWT_TOPOLOGY* topo,
             newedge.face_left, newedge.face_right);
     return -1;
   }
-  else if ( newedge.face_left == -1 )
+  else if ( newedge.face_left == -1 && modFace > -1 )
   {
     lwerror("Could not derive edge face from linked primitives:"
             " invalid topology ?");
