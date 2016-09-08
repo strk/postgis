@@ -3615,7 +3615,7 @@ lwt_ChangeEdgeGeom(LWT_TOPOLOGY* topo, LWT_ELEMID edge_id, LWLINE *geom)
   LWT_ISO_FACE faces[2];
   LWGEOM *nface1 = NULL;
   LWGEOM *nface2 = NULL;
-  if ( oldedge->face_left != 0 )
+  if ( oldedge->face_left > 0 )
   {
     nface1 = lwt_GetFaceGeometry(topo, oldedge->face_left);
     if ( ! nface1 )
@@ -3638,7 +3638,7 @@ lwt_ChangeEdgeGeom(LWT_TOPOLOGY* topo, LWT_ELEMID edge_id, LWLINE *geom)
     /* ownership left to nface */
     faces[facestoupdate++].mbr = nface1->bbox;
   }
-  if ( oldedge->face_right != 0
+  if ( oldedge->face_right > 0
        /* no need to update twice the same face.. */
        && oldedge->face_right != oldedge->face_left )
   {
