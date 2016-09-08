@@ -4403,7 +4403,11 @@ Datum TopoGeo_AddLinestring(PG_FUNCTION_ARGS)
     }
 
     POSTGIS_DEBUG(1, "Calling lwt_AddLine");
-    elems = lwt_AddLine(topo, ln, tol, &nelems);
+    if ( PG_NARGS() > 3 ) {
+      elems = lwt_AddLineNoFace(topo, ln, tol, &nelems);
+    } else {
+      elems = lwt_AddLine(topo, ln, tol, &nelems);
+    }
     POSTGIS_DEBUG(1, "lwt_AddLine returned");
     lwgeom_free(lwgeom);
     PG_FREE_IF_COPY(geom, 1);
