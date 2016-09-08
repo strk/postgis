@@ -521,9 +521,17 @@ lwt_FreeTopology( LWT_TOPOLOGY* topo )
   lwfree(topo);
 }
 
-LWT_ELEMID
-lwt_AddIsoNode( LWT_TOPOLOGY* topo, LWT_ELEMID face,
-                LWPOINT* pt, int skipISOChecks )
+/**
+ * @param checkFace if non zero will check the given face
+ *        for really containing the point or determine the
+ *        face when given face is -1. Use 0 to simply use
+ *        the given face value, no matter what (effectively
+ *        allowing adding a non-isolated point when used
+ *        with face=-1).
+ */
+static LWT_ELEMID
+_lwt_AddIsoNode( LWT_TOPOLOGY* topo, LWT_ELEMID face,
+                LWPOINT* pt, int skipISOChecks, int checkFace )
 {
   LWT_ELEMID foundInFace = -1;
 
@@ -541,7 +549,7 @@ lwt_AddIsoNode( LWT_TOPOLOGY* topo, LWT_ELEMID face,
     }
   }
 
-  if ( face == -1 || ! skipISOChecks )
+  if ( checkFace && ( face == -1 || ! skipISOChecks ) )
   {
     foundInFace = lwt_be_getFaceContainingPoint(topo, pt); /*x*/
     if ( foundInFace == -2 ) {
@@ -575,6 +583,13 @@ lwt_AddIsoNode( LWT_TOPOLOGY* topo, LWT_ELEMID face,
   }
 
   return node.node_id;
+}
+
+LWT_ELEMID
+lwt_AddIsoNode( LWT_TOPOLOGY* topo, LWT_ELEMID face,
+                LWPOINT* pt, int skipISOChecks )
+{
+	return _lwt_AddIsoNode( topo, face, pt, skipISOChecks, 1 );
 }
 
 /* Check that an edge does not cross an existing node or edge
@@ -5012,8 +5027,13 @@ compare_scored_pointer(const void *si1, const void *si2)
 		return 0;
 }
 
-LWT_ELEMID
-lwt_AddPoint(LWT_TOPOLOGY* topo, LWPOINT* point, double tol)
+/*
+ * @param findFace if non-zero the code will determine which face
+ *        contains the given point (unless it is known to be NOT
+ *        isolated)
+ */
+static LWT_ELEMID
+_lwt_AddPoint(LWT_TOPOLOGY* topo, LWPOINT* point, double tol, int findFace)
 {
   int num, i;
   double mindist = FLT_MAX;
@@ -5333,7 +5353,7 @@ lwt_AddPoint(LWT_TOPOLOGY* topo, LWPOINT* point, double tol)
   {
     /* The point is isolated, add it as such */
     /* TODO: pass 1 as last argument (skipChecks) ? */
-    id = lwt_AddIsoNode(topo, -1, point, 0);
+    id = _lwt_AddIsoNode(topo, -1, point, 0, findFace);
     if ( -1 == id )
     {
       /* should have invoked lwerror already, leaking memory */
@@ -5343,6 +5363,12 @@ lwt_AddPoint(LWT_TOPOLOGY* topo, LWPOINT* point, double tol)
   }
 
   return id;
+}
+
+LWT_ELEMID
+lwt_AddPoint(LWT_TOPOLOGY* topo, LWPOINT* point, double tol)
+{
+  return _lwt_AddPoint(topo, point, tol, 1);
 }
 
 /* Return identifier of an equal edge, 0 if none or -1 on error
@@ -5444,7 +5470,7 @@ _lwt_AddLineEdge( LWT_TOPOLOGY* topo, LWLINE* edge, double tol,
     lwnotice("Empty component of noded line");
     return 0; /* must be empty */
   }
-  nid[0] = lwt_AddPoint( topo, start_point, tol );
+  nid[0] = _lwt_AddPoint( topo, start_point, tol, handleFaceSplit );
   lwpoint_free(start_point); /* too late if lwt_AddPoint calls lwerror */
   if ( nid[0] == -1 ) return -1; /* lwerror should have been called */
 
@@ -5455,7 +5481,7 @@ _lwt_AddLineEdge( LWT_TOPOLOGY* topo, LWLINE* edge, double tol,
             "after successfully getting first point !?");
     return -1;
   }
-  nid[1] = lwt_AddPoint( topo, end_point, tol );
+  nid[1] = _lwt_AddPoint( topo, end_point, tol, handleFaceSplit );
   lwpoint_free(end_point); /* too late if lwt_AddPoint calls lwerror */
   if ( nid[1] == -1 ) return -1; /* lwerror should have been called */
 
