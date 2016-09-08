@@ -333,11 +333,19 @@ addEdgeValues(StringInfo str, const LWT_ISO_EDGE *edge, int fields, int fullEdge
     sep = ",";
   }
   if ( fields & LWT_COL_EDGE_FACE_LEFT ) {
-    appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_left);
+    if ( edge->face_left == -1 ) {
+      appendStringInfo(str, "%sNULL", sep);
+    } else {
+      appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_left);
+    }
     sep = ",";
   }
   if ( fields & LWT_COL_EDGE_FACE_RIGHT ) {
-    appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_right);
+    if ( edge->face_right == -1 ) {
+      appendStringInfo(str, "%sNULL", sep);
+    } else {
+      appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_right);
+    }
     sep = ",";
   }
   if ( fields & LWT_COL_EDGE_NEXT_LEFT ) {
