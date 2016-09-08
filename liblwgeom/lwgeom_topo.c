@@ -2325,6 +2325,13 @@ _lwt_AddFaceSplit( LWT_TOPOLOGY* topo,
   return newface.face_id;
 }
 
+/**
+ * @param modFace can be
+ *    0 - have two new faces replace a splitted face
+ *    1 - modify a splitted face, adding a new one
+ *   -1 - do not check at all for face splitting
+ *
+ */
 static LWT_ELEMID
 _lwt_AddEdge( LWT_TOPOLOGY* topo,
               LWT_ELEMID start_node, LWT_ELEMID end_node,
@@ -2704,7 +2711,9 @@ _lwt_AddEdge( LWT_TOPOLOGY* topo,
     }
   }
 
-  /* Check face splitting */
+  /* Check face splitting, if required */
+
+  if ( modFace > -1 ) {
 
   if ( ! isclosed && ( epan.was_isolated || span.was_isolated ) )
   {
@@ -2771,6 +2780,8 @@ _lwt_AddEdge( LWT_TOPOLOGY* topo,
       }
     }
   }
+
+  } // end of face split checking
 
   return newedge.edge_id;
 }
@@ -5405,9 +5416,15 @@ _lwt_GetEqualEdge( LWT_TOPOLOGY *topo, LWLINE *edge )
 /*
  * Add a pre-noded pre-split line edge. Used by lwt_AddLine
  * Return edge id, 0 if none added (empty edge), -1 on error
+ *
+ * @param handleFaceSplit if non-zero the code will check
+ *        if the newly added edge would split a face and if so
+ *        would create new faces accordingly. Otherwise it will
+ *        set left_face and right_face to null (-1)
  */
 static LWT_ELEMID
-_lwt_AddLineEdge( LWT_TOPOLOGY* topo, LWLINE* edge, double tol )
+_lwt_AddLineEdge( LWT_TOPOLOGY* topo, LWLINE* edge, double tol,
+									int handleFaceSplit )
 {
   LWCOLLECTION *col;
   LWPOINT *start_point, *end_point;
@@ -5564,7 +5581,7 @@ _lwt_AddLineEdge( LWT_TOPOLOGY* topo, LWLINE* edge, double tol )
 
 
   /* TODO: skip checks ? */
-  id = lwt_AddEdgeModFace( topo, nid[0], nid[1], edge, 0 );
+  id = _lwt_AddEdge( topo, nid[0], nid[1], edge, 0, handleFaceSplit ?  1 : -1 );
   LWDEBUGF(1, "lwt_AddEdgeModFace returned %" LWTFMT_ELEMID, id);
   if ( id == -1 )
   {
@@ -5600,8 +5617,9 @@ _lwt_split_by_nodes(const LWGEOM *g, const LWGEOM *nodes)
   return bg;
 }
 
-LWT_ELEMID*
-lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges)
+static LWT_ELEMID*
+_lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges,
+						int handleFaceSplit)
 {
   LWGEOM *geomsbuf[1];
   LWGEOM **geoms;
@@ -5827,7 +5845,7 @@ lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges)
     }
 #endif
 
-    id = _lwt_AddLineEdge( topo, lwgeom_as_lwline(g), tol );
+    id = _lwt_AddLineEdge( topo, lwgeom_as_lwline(g), tol, handleFaceSplit );
     LWDEBUGF(1, "_lwt_AddLineEdge returned %" LWTFMT_ELEMID, id);
     if ( id < 0 )
     {
@@ -5853,6 +5871,18 @@ lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges)
 
   *nedges = num;
   return ids;
+}
+
+LWT_ELEMID*
+lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges)
+{
+	return _lwt_AddLine(topo, line, tol, nedges, 1);
+}
+
+LWT_ELEMID*
+lwt_AddLineNoFace(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges)
+{
+	return _lwt_AddLine(topo, line, tol, nedges, 0);
 }
 
 LWT_ELEMID*

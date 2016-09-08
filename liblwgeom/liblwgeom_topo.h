@@ -1057,6 +1057,30 @@ LWT_ELEMID* lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol,
                         int* nedges);
 
 /**
+ * Adds a linestring to the topology without determining generated faces
+ *
+ * The given line will snap to existing nodes or edges within given
+ * tolerance. Existing edges or faces may be split by the line.
+ *
+ * Side faces for the new edges will not be determined and no new
+ * faces will be created, effectively leaving the topology in an
+ * invalid state (WARNING!)
+ *
+ * @param topo the topology to operate on
+ * @param line the line to add
+ * @param tol snap tolerance, the topology tolerance will be used if 0
+ * @param nedges output parameter, will be set to number of edges the
+ *               line was split into, or -1 on error
+ *               (liblwgeom error handler will be invoked with error message)
+ *
+ * @return an array of <nedges> edge identifiers that sewed togheter
+ *         will build up the input linestring (after snapping). Caller
+ *         will need to free the array using lwfree(), if not null.
+ */
+LWT_ELEMID* lwt_AddLineNoFace(LWT_TOPOLOGY* topo, LWLINE* line, double tol,
+                        int* nedges);
+
+/**
  * Adds a polygon to the topology
  *
  * The boundary of the given polygon will snap to existing nodes or
