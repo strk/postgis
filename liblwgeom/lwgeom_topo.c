@@ -2571,7 +2571,7 @@ _lwt_AddEdge( LWT_TOPOLOGY* topo,
                 newedge.edge_id, newedge.next_left, prev_right);
     if ( newedge.face_right == -1 ) {
       newedge.face_right = span.ccwFace;
-    } else if ( newedge.face_right != epan.ccwFace ) {
+    } else if ( modFace != -1 && newedge.face_right != epan.ccwFace ) {
       /* side-location conflict */
       lwerror("Side-location conflict: "
               "new edge starts in face"
@@ -2583,7 +2583,7 @@ _lwt_AddEdge( LWT_TOPOLOGY* topo,
     }
     if ( newedge.face_left == -1 ) {
       newedge.face_left = span.cwFace;
-    } else if ( newedge.face_left != epan.cwFace ) {
+    } else if ( modFace != -1 && newedge.face_left != epan.cwFace ) {
       /* side-location conflict */
       lwerror("Side-location conflict: "
               "new edge starts in face"
