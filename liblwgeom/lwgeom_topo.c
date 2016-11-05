@@ -5092,7 +5092,8 @@ _lwt_AddPoint(LWT_TOPOLOGY* topo, LWPOINT* point, double tol, int findFace)
       LWGEOM *g = lwpoint_as_lwgeom(n->geom);
       double dist = lwgeom_mindistance2d(g, pt);
       /* TODO: move this check in the previous sort scan ... */
-      if ( dist >= tol ) continue; /* must be closer than tolerated */
+      /* must be closer than tolerated, unless distance is zero */
+      if ( dist && dist >= tol ) continue;
       if ( ! id || dist < mindist )
       {
         id = n->node_id;
@@ -5708,7 +5709,8 @@ _lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges,
       LWGEOM *g = lwline_as_lwgeom(e->geom);
       LWDEBUGF(2, "Computing distance from edge %d having %d points", i, e->geom->points->npoints);
       double dist = lwgeom_mindistance2d(g, noded);
-      if ( dist >= tol ) continue; /* must be closer than tolerated */
+      /* must be closer than tolerated, unless distance is zero */
+      if ( dist && dist >= tol ) continue;
       nearby[nn++] = g;
     }
     LWDEBUGF(2, "Found %d lines closer than tolerance (%g)", nn, tol);
@@ -5782,7 +5784,8 @@ _lwt_AddLine(LWT_TOPOLOGY* topo, LWLINE* line, double tol, int* nedges,
       LWT_ISO_NODE *n = &(nodes[i]);
       LWGEOM *g = lwpoint_as_lwgeom(n->geom);
       double dist = lwgeom_mindistance2d(g, noded);
-      if ( dist >= tol ) continue; /* must be closer than tolerated */
+      /* must be closer than tolerated, unless distance is zero */
+      if ( dist && dist >= tol ) continue;
       nearby[nn++] = g;
     }
     if ( nn )
