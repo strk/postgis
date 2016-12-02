@@ -683,6 +683,11 @@ CREATE OR REPLACE FUNCTION topology.TopoGeo_addLinestring(atopology varchar, ali
 	RETURNS SETOF int AS
 	'MODULE_PATHNAME', 'TopoGeo_AddLinestring'
   LANGUAGE 'c' VOLATILE;
+
+CREATE OR REPLACE FUNCTION topology.TopoGeo_addLinestringNoface(atopology varchar, aline geometry, tolerance float8 DEFAULT 0, skipface bool DEFAULT false)
+	RETURNS SETOF int AS
+	'MODULE_PATHNAME', 'TopoGeo_AddLinestring'
+  LANGUAGE 'c' VOLATILE;
 --} TopoGeo_addLinestring
 
 --{
@@ -712,3 +717,8 @@ END
 $$
 LANGUAGE 'plpgsql';
 --} TopoGeo_AddGeometry
+
+CREATE OR REPLACE FUNCTION topology.RegisterMissingFaces(atopology varchar)
+	RETURNS void AS
+	'MODULE_PATHNAME', 'RegisterMissingFaces'
+  LANGUAGE 'c' VOLATILE;

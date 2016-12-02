@@ -333,11 +333,19 @@ addEdgeValues(StringInfo str, const LWT_ISO_EDGE *edge, int fields, int fullEdge
     sep = ",";
   }
   if ( fields & LWT_COL_EDGE_FACE_LEFT ) {
-    appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_left);
+    if ( edge->face_left == -1 ) {
+      appendStringInfo(str, "%sNULL", sep);
+    } else {
+      appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_left);
+    }
     sep = ",";
   }
   if ( fields & LWT_COL_EDGE_FACE_RIGHT ) {
-    appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_right);
+    if ( edge->face_right == -1 ) {
+      appendStringInfo(str, "%sNULL", sep);
+    } else {
+      appendStringInfo(str, "%s%" LWTFMT_ELEMID, sep, edge->face_right);
+    }
     sep = ",";
   }
   if ( fields & LWT_COL_EDGE_NEXT_LEFT ) {
@@ -645,7 +653,7 @@ fillEdgeFields(LWT_ISO_EDGE* edge, HeapTuple row, TupleDesc rowdesc, int fields)
   if ( fields & LWT_COL_EDGE_FACE_LEFT ) {
     dat = SPI_getbinval(row, rowdesc, ++colno, &isnull);
     if ( isnull ) {
-      lwpgwarning("Found edge with NULL face_left");
+      //lwpgwarning("Found edge with NULL face_left");
       edge->face_left = -1;
     } else {
       val = DatumGetInt32(dat);
@@ -657,7 +665,7 @@ fillEdgeFields(LWT_ISO_EDGE* edge, HeapTuple row, TupleDesc rowdesc, int fields)
   if ( fields & LWT_COL_EDGE_FACE_RIGHT ) {
     dat = SPI_getbinval(row, rowdesc, ++colno, &isnull);
     if ( isnull ) {
-      lwpgwarning("Found edge with NULL face_right");
+      //lwpgwarning("Found edge with NULL face_right");
       edge->face_right = -1;
     } else {
       val = DatumGetInt32(dat);
@@ -915,10 +923,14 @@ cb_getEdgeByFace(const LWT_BE_TOPOLOGY* topo,
   Datum values[2];
   Oid argtypes[2];
   int nargs = 1;
+  int has_null = 0;
   GSERIALIZED *gser = NULL;
 
   datum_ids = palloc(sizeof(Datum)*(*numelems));
-  for (i=0; i<*numelems; ++i) datum_ids[i] = Int32GetDatum(ids[i]);
+  for (i=0; i<*numelems; ++i) {
+    if ( ids[i] == -1 ) has_null = 1;
+    datum_ids[i] = Int32GetDatum(ids[i]);
+  }
   array_ids = construct_array(datum_ids, *numelems, INT4OID, 4, true, 's');
 
   initStringInfo(sql);
@@ -926,11 +938,18 @@ cb_getEdgeByFace(const LWT_BE_TOPOLOGY* topo,
   addEdgeFields(sql, fields, 0);
   appendStringInfo(sql, " FROM \"%s\".edge_data"
                         " WHERE ( left_face = ANY($1) "
-                        " OR right_face = ANY ($1) )",
+                        " OR right_face = ANY ($1)",
                    topo->name);
+  if ( has_null )
+  {
+    appendStringInfoString(sql,
+      " OR right_face IS NULL OR left_face IS NULL");
+  }
+  appendStringInfoString(sql, ")");
 
   values[0] = PointerGetDatum(array_ids);
   argtypes[0] = INT4ARRAYOID;
+
 
   if ( box )
   {
@@ -4399,7 +4418,11 @@ Datum TopoGeo_AddLinestring(PG_FUNCTION_ARGS)
     }
 
     POSTGIS_DEBUG(1, "Calling lwt_AddLine");
-    elems = lwt_AddLine(topo, ln, tol, &nelems);
+    if ( PG_NARGS() > 3 ) {
+      elems = lwt_AddLineNoFace(topo, ln, tol, &nelems);
+    } else {
+      elems = lwt_AddLine(topo, ln, tol, &nelems);
+    }
     POSTGIS_DEBUG(1, "lwt_AddLine returned");
     lwgeom_free(lwgeom);
     PG_FREE_IF_COPY(geom, 1);
@@ -4569,4 +4592,45 @@ Datum TopoGeo_AddPolygon(PG_FUNCTION_ARGS)
   result = Int32GetDatum((int32)id);
 
   SRF_RETURN_NEXT(funcctx, result);
+}
+
+/*  RegisterMissingFaces(atopology) */
+Datum RegisterMissingFaces(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(RegisterMissingFaces);
+Datum RegisterMissingFaces(PG_FUNCTION_ARGS)
+{
+  text* toponame_text;
+  char* toponame;
+  LWT_TOPOLOGY *topo;
+
+  toponame_text = PG_GETARG_TEXT_P(0);
+  toponame = text2cstring(toponame_text);
+	PG_FREE_IF_COPY(toponame_text, 0);
+
+  if ( SPI_OK_CONNECT != SPI_connect() ) {
+    lwpgerror("Could not connect to SPI");
+    PG_RETURN_NULL();
+  }
+
+  {
+    int pre = be_data.topoLoadFailMessageFlavor;
+    be_data.topoLoadFailMessageFlavor = 1;
+    topo = lwt_LoadTopology(be_iface, toponame);
+    be_data.topoLoadFailMessageFlavor = pre;
+  }
+  pfree(toponame);
+  if ( ! topo ) {
+    /* should never reach this point, as lwerror would raise an exception */
+    SPI_finish();
+    PG_RETURN_NULL();
+  }
+
+  POSTGIS_DEBUG(1, "Calling lwt_Polygonize");
+  lwt_Polygonize(topo);
+  POSTGIS_DEBUG(1, "lwt_Polygonize returned");
+  lwt_FreeTopology(topo);
+
+  SPI_finish();
+
+  PG_RETURN_NULL();
 }
