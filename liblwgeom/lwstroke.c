@@ -2,12 +2,27 @@
  *
  * PostGIS - Spatial Types for PostgreSQL
  * http://postgis.net
- * Copyright 2001-2006 Refractions Research Inc.
  *
- * This is free software; you can redistribute and/or modify it under
- * the terms of the GNU General Public Licence. See the COPYING file.
+ * PostGIS is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * PostGIS is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with PostGIS.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ **********************************************************************
+ *
+ * Copyright (C) 2001-2006 Refractions Research Inc.
+ * Copyright (C) 2017      Sandro Santilli <strk@kbt.io>
  *
  **********************************************************************/
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,10 +35,6 @@
 
 #include "lwgeom_log.h"
 
-
-LWMLINE* lwmcurve_stroke(const LWMCURVE *mcurve, uint32_t perQuad);
-LWMPOLY* lwmsurface_stroke(const LWMSURFACE *msurface, uint32_t perQuad);
-LWCOLLECTION* lwcollection_stroke(const LWCOLLECTION *collection, uint32_t perQuad);
 
 LWGEOM* pta_unstroke(const POINTARRAY *points, int type, int srid);
 LWGEOM* lwline_unstroke(const LWLINE *line);
@@ -64,7 +75,7 @@ lwgeom_has_arc(const LWGEOM *geom)
 		col = (LWCOLLECTION *)geom;
 		for (i=0; i<col->ngeoms; i++)
 		{
-			if (lwgeom_has_arc(col->geoms[i]) == LW_TRUE) 
+			if (lwgeom_has_arc(col->geoms[i]) == LW_TRUE)
 				return LW_TRUE;
 		}
 		return LW_FALSE;
@@ -98,8 +109,25 @@ static double interpolate_arc(double angle, double a1, double a2, double a3, dou
 	}
 }
 
-static POINTARRAY *
-lwcircle_stroke(const POINT4D *p1, const POINT4D *p2, const POINT4D *p3, uint32_t perQuad)
+/**
+ * Segmentize an arc
+ *
+ * @param to POINTARRAY to append segmentized vertices to
+ * @param p1 first point defining the arc
+ * @param p2 second point defining the arc
+ * @param p3 third point defining the arc
+ * @param tol tolerance, semantic driven by tolerance_type
+ * @param tolerance_type see LW_LINEARIZE_TOLERANCE_TYPE
+ * @param flags LW_LINEARIZE_FLAGS
+ *
+ * @return number of points appended (0 if collinear),
+ *         or -1 on error (lwerror would be called).
+ */
+static int
+lwarc_linearize(POINTARRAY *to,
+                 const POINT4D *p1, const POINT4D *p2, const POINT4D *p3,
+                 double tol, LW_LINEARIZE_TOLERANCE_TYPE tolerance_type,
+                 int flags)
 {
 	POINT2D center;
 	POINT2D *t1 = (POINT2D*)p1;
@@ -110,11 +138,13 @@ lwcircle_stroke(const POINT4D *p1, const POINT4D *p2, const POINT4D *p3, uint32_
 	int clockwise = LW_TRUE;
 	double radius; /* Arc radius */
 	double increment; /* Angle per segment */
+	double angle_shift = 0;
 	double a1, a2, a3, angle;
-	POINTARRAY *pa;
+	POINTARRAY *pa = to;
 	int is_circle = LW_FALSE;
+	int points_added = 0;
 
-	LWDEBUG(2, "lwcircle_calculate_gbox called.");
+	LWDEBUG(2, "lwarc_linearize called.");
 
 	radius = lw_arc_center(t1, t2, t3, &center);
 	p2_side = lw_segment_side(t1, t3, t2);
@@ -122,29 +152,106 @@ lwcircle_stroke(const POINT4D *p1, const POINT4D *p2, const POINT4D *p3, uint32_
 	/* Matched start/end points imply circle */
 	if ( p1->x == p3->x && p1->y == p3->y )
 		is_circle = LW_TRUE;
-	
+
 	/* Negative radius signals straight line, p1/p2/p3 are colinear */
 	if ( (radius < 0.0 || p2_side == 0) && ! is_circle )
-	    return NULL;
-		
-	/* The side of the p1/p3 line that p2 falls on dictates the sweep  
+	    return 0;
+
+	/* The side of the p1/p3 line that p2 falls on dictates the sweep
 	   direction from p1 to p3. */
 	if ( p2_side == -1 )
 		clockwise = LW_TRUE;
 	else
 		clockwise = LW_FALSE;
-		
-	increment = fabs(M_PI_2 / perQuad);
-	
+
+	if ( tolerance_type == LW_LINEARIZE_TOLERANCE_TYPE_SEGS_PER_QUAD )
+	{{
+		int perQuad = rint(tol);
+		// error out if tol != perQuad ? (not-round)
+		if ( perQuad != tol )
+		{
+			lwerror("lwarc_linearize: segments per quadrant must be an integer value, got %.15g", tol, perQuad);
+			return -1;
+		}
+		if ( perQuad < 1 )
+		{
+			lwerror("lwarc_linearize: segments per quadrant must be at least 1, got %d", perQuad);
+			return -1;
+		}
+		increment = fabs(M_PI_2 / perQuad);
+		LWDEBUGF(2, "lwarc_linearize: perQuad:%d, increment:%g", perQuad, increment);
+
+	}}
+	else if ( tolerance_type == LW_LINEARIZE_TOLERANCE_TYPE_MAX_DEVIATION )
+	{{
+		double halfAngle;
+		if ( tol <= 0 )
+		{
+			lwerror("lwarc_linearize: max deviation must be bigger than 0, got %.15g", tol);
+			return -1;
+		}
+		halfAngle = acos( -tol / radius + 1 );
+		increment = 2 * halfAngle;
+		LWDEBUGF(2, "lwarc_linearize: maxDiff:%g, radius:%g, halfAngle:%g, increment:%g", tol, radius, halfAngle, increment);
+	}}
+	else if ( tolerance_type == LW_LINEARIZE_TOLERANCE_TYPE_MAX_ANGLE )
+	{
+		increment = tol;
+		if ( increment <= 0 )
+		{
+			lwerror("lwarc_linearize: max angle must be bigger than 0, got %.15g", tol);
+			return -1;
+		}
+	}
+	else
+	{
+		lwerror("lwarc_linearize: unsupported tolerance type %d", tolerance_type);
+		return LW_FALSE;
+	}
+
 	/* Angles of each point that defines the arc section */
 	a1 = atan2(p1->y - center.y, p1->x - center.x);
 	a2 = atan2(p2->y - center.y, p2->x - center.x);
 	a3 = atan2(p3->y - center.y, p3->x - center.x);
 
+	if ( flags & LW_LINEARIZE_FLAG_SYMMETRIC )
+	{
+		if ( flags & LW_LINEARIZE_FLAG_RETAIN_ANGLE )
+		{{
+			/* Total arc angle, in radians */
+			double angle = a3 - a1;
+			/* Number of steps */
+			int steps = floor(angle / increment);
+			/* Angle reminder */
+			double angle_reminder = angle - ( increment * steps );
+			angle_shift = angle_reminder / 2.0;
+
+			LWDEBUGF(2, "lwarc_linearize SYMMETRIC/RETAIN_ANGLE operation requested - "
+			         "A:%g - LINESTRING(%g %g,%g %g,%g %g) - R:%g",
+			         angle, p1->x, p1->y, center.x, center.y, p3->x, p3->y,
+			         angle_reminder);
+		}}
+		else
+		{{
+			/* Total arc angle, in radians */
+			double angle = fabs(a3 - a1);
+			/* Number of segments in output */
+			int segs = ceil(angle / increment);
+			/* Tweak increment to be regular for all the arc */
+			increment = angle/segs;
+
+			LWDEBUGF(2, "lwarc_linearize SYMMETRIC operation requested - "
+							"A:%g - LINESTRING(%g %g,%g %g,%g %g) - S:%d - I:%g",
+							angle, p1->x, p1->y, center.x, center.y, p3->x, p3->y,
+							segs, increment);
+		}}
+	}
+
 	/* p2 on left side => clockwise sweep */
 	if ( clockwise )
 	{
 		increment *= -1;
+		angle_shift *= -1;
 		/* Adjust a3 down so we can decrement from a1 to a3 cleanly */
 		if ( a3 > a1 )
 			a3 -= 2.0 * M_PI;
@@ -160,7 +267,7 @@ lwcircle_stroke(const POINT4D *p1, const POINT4D *p2, const POINT4D *p3, uint32_
 		if ( a2 < a1 )
 			a2 += 2.0 * M_PI;
 	}
-	
+
 	/* Override angles for circle case */
 	if( is_circle )
 	{
@@ -169,59 +276,62 @@ lwcircle_stroke(const POINT4D *p1, const POINT4D *p2, const POINT4D *p3, uint32_
 		increment = fabs(increment);
 		clockwise = LW_FALSE;
 	}
-	
-	/* Initialize point array */
-	pa = ptarray_construct_empty(1, 1, 32);
 
 	/* Sweep from a1 to a3 */
 	ptarray_append_point(pa, p1, LW_FALSE);
-	for ( angle = a1 + increment; clockwise ? angle > a3 : angle < a3; angle += increment ) 
+	++points_added;
+	for ( angle = a1 + increment - angle_shift; clockwise ? angle > a3 : angle < a3; angle += increment )
 	{
 		pt.x = center.x + radius * cos(angle);
 		pt.y = center.y + radius * sin(angle);
 		pt.z = interpolate_arc(angle, a1, a2, a3, p1->z, p2->z, p3->z);
 		pt.m = interpolate_arc(angle, a1, a2, a3, p1->m, p2->m, p3->m);
 		ptarray_append_point(pa, &pt, LW_FALSE);
-	}	
-	return pa;
+		++points_added;
+		angle_shift = 0;
+	}
+	return points_added;
 }
 
-LWLINE *
-lwcircstring_stroke(const LWCIRCSTRING *icurve, uint32_t perQuad)
+/*
+ * @param icurve input curve
+ * @param tol tolerance, semantic driven by tolerance_type
+ * @param tolerance_type see LW_LINEARIZE_TOLERANCE_TYPE
+ * @param flags see flags in lwarc_linearize
+ *
+ * @return a newly allocated LWLINE
+ */
+static LWLINE *
+lwcircstring_linearize(const LWCIRCSTRING *icurve, double tol,
+                        LW_LINEARIZE_TOLERANCE_TYPE tolerance_type,
+                        int flags)
 {
 	LWLINE *oline;
 	POINTARRAY *ptarray;
-	POINTARRAY *tmp;
 	uint32_t i, j;
 	POINT4D p1, p2, p3, p4;
+	int ret;
 
-	LWDEBUGF(2, "lwcircstring_stroke called., dim = %d", icurve->points->flags);
+	LWDEBUGF(2, "lwcircstring_linearize called., dim = %d", icurve->points->flags);
 
 	ptarray = ptarray_construct_empty(FLAGS_GET_Z(icurve->points->flags), FLAGS_GET_M(icurve->points->flags), 64);
 
 	for (i = 2; i < icurve->points->npoints; i+=2)
 	{
-		LWDEBUGF(3, "lwcircstring_stroke: arc ending at point %d", i);
+		LWDEBUGF(3, "lwcircstring_linearize: arc ending at point %d", i);
 
 		getPoint4d_p(icurve->points, i - 2, &p1);
 		getPoint4d_p(icurve->points, i - 1, &p2);
 		getPoint4d_p(icurve->points, i, &p3);
-		tmp = lwcircle_stroke(&p1, &p2, &p3, perQuad);
 
-		if (tmp)
+		ret = lwarc_linearize(ptarray, &p1, &p2, &p3, tol, tolerance_type, flags);
+		if ( ret > 0 )
 		{
-			LWDEBUGF(3, "lwcircstring_stroke: generated %d points", tmp->npoints);
-
-			for (j = 0; j < tmp->npoints; j++)
-			{
-				getPoint4d_p(tmp, j, &p4);
-				ptarray_append_point(ptarray, &p4, LW_TRUE);
-			}
-			ptarray_free(tmp);
+			LWDEBUGF(3, "lwcircstring_linearize: generated %d points", tmp->npoints);
 		}
-		else
+		else if ( ret == 0 )
 		{
-			LWDEBUG(3, "lwcircstring_stroke: points are colinear, returning curve points as line");
+			LWDEBUG(3, "lwcircstring_linearize: points are colinear, returning curve points as line");
 
 			for (j = i - 2 ; j < i ; j++)
 			{
@@ -229,17 +339,32 @@ lwcircstring_stroke(const LWCIRCSTRING *icurve, uint32_t perQuad)
 				ptarray_append_point(ptarray, &p4, LW_TRUE);
 			}
 		}
-
+		else
+		{
+			/* An error occurred, lwerror should have been called by now */
+			ptarray_free(ptarray);
+			return NULL;
+		}
 	}
 	getPoint4d_p(icurve->points, icurve->points->npoints-1, &p1);
 	ptarray_append_point(ptarray, &p1, LW_TRUE);
-		
+
 	oline = lwline_construct(icurve->srid, NULL, ptarray);
 	return oline;
 }
 
-LWLINE *
-lwcompound_stroke(const LWCOMPOUND *icompound, uint32_t perQuad)
+/*
+ * @param icompound input compound curve
+ * @param tol tolerance, semantic driven by tolerance_type
+ * @param tolerance_type see LW_LINEARIZE_TOLERANCE_TYPE
+ * @param flags see flags in lwarc_linearize
+ *
+ * @return a newly allocated LWLINE
+ */
+static LWLINE *
+lwcompound_linearize(const LWCOMPOUND *icompound, double tol,
+                      LW_LINEARIZE_TOLERANCE_TYPE tolerance_type,
+                      int flags)
 {
 	LWGEOM *geom;
 	POINTARRAY *ptarray = NULL, *ptarray_out = NULL;
@@ -256,7 +381,7 @@ lwcompound_stroke(const LWCOMPOUND *icompound, uint32_t perQuad)
 		geom = icompound->geoms[i];
 		if (geom->type == CIRCSTRINGTYPE)
 		{
-			tmp = lwcircstring_stroke((LWCIRCSTRING *)geom, perQuad);
+			tmp = lwcircstring_linearize((LWCIRCSTRING *)geom, tol, tolerance_type, flags);
 			for (j = 0; j < tmp->points->npoints; j++)
 			{
 				getPoint4d_p(tmp->points, j, &p);
@@ -285,8 +410,26 @@ lwcompound_stroke(const LWCOMPOUND *icompound, uint32_t perQuad)
 	return lwline_construct(icompound->srid, NULL, ptarray_out);
 }
 
-LWPOLY *
-lwcurvepoly_stroke(const LWCURVEPOLY *curvepoly, uint32_t perQuad)
+/* Kept for backward compatibility - TODO: drop */
+LWLINE *
+lwcompound_stroke(const LWCOMPOUND *icompound, uint32_t perQuad)
+{
+		return lwcompound_linearize(icompound, perQuad, LW_LINEARIZE_TOLERANCE_TYPE_SEGS_PER_QUAD, 0);
+}
+
+
+/*
+ * @param icompound input curve polygon
+ * @param tol tolerance, semantic driven by tolerance_type
+ * @param tolerance_type see LW_LINEARIZE_TOLERANCE_TYPE
+ * @param flags see flags in lwarc_linearize
+ *
+ * @return a newly allocated LWPOLY
+ */
+static LWPOLY *
+lwcurvepoly_linearize(const LWCURVEPOLY *curvepoly, double tol,
+                       LW_LINEARIZE_TOLERANCE_TYPE tolerance_type,
+                       int flags)
 {
 	LWPOLY *ogeom;
 	LWGEOM *tmp;
@@ -294,7 +437,7 @@ lwcurvepoly_stroke(const LWCURVEPOLY *curvepoly, uint32_t perQuad)
 	POINTARRAY **ptarray;
 	int i;
 
-	LWDEBUG(2, "lwcurvepoly_stroke called.");
+	LWDEBUG(2, "lwcurvepoly_linearize called.");
 
 	ptarray = lwalloc(sizeof(POINTARRAY *)*curvepoly->nrings);
 
@@ -303,7 +446,7 @@ lwcurvepoly_stroke(const LWCURVEPOLY *curvepoly, uint32_t perQuad)
 		tmp = curvepoly->rings[i];
 		if (tmp->type == CIRCSTRINGTYPE)
 		{
-			line = lwcircstring_stroke((LWCIRCSTRING *)tmp, perQuad);
+			line = lwcircstring_linearize((LWCIRCSTRING *)tmp, tol, tolerance_type, flags);
 			ptarray[i] = ptarray_clone_deep(line->points);
 			lwline_free(line);
 		}
@@ -314,7 +457,7 @@ lwcurvepoly_stroke(const LWCURVEPOLY *curvepoly, uint32_t perQuad)
 		}
 		else if (tmp->type == COMPOUNDTYPE)
 		{
-			line = lwcompound_stroke((LWCOMPOUND *)tmp, perQuad);
+			line = lwcompound_linearize((LWCOMPOUND *)tmp, tol, tolerance_type, flags);
 			ptarray[i] = ptarray_clone_deep(line->points);
 			lwline_free(line);
 		}
@@ -329,14 +472,32 @@ lwcurvepoly_stroke(const LWCURVEPOLY *curvepoly, uint32_t perQuad)
 	return ogeom;
 }
 
-LWMLINE *
-lwmcurve_stroke(const LWMCURVE *mcurve, uint32_t perQuad)
+/* Kept for backward compatibility - TODO: drop */
+LWPOLY *
+lwcurvepoly_stroke(const LWCURVEPOLY *curvepoly, uint32_t perQuad)
+{
+		return lwcurvepoly_linearize(curvepoly, perQuad, LW_LINEARIZE_TOLERANCE_TYPE_SEGS_PER_QUAD, 0);
+}
+
+
+/**
+ * @param mcurve input compound curve
+ * @param tol tolerance, semantic driven by tolerance_type
+ * @param tolerance_type see LW_LINEARIZE_TOLERANCE_TYPE
+ * @param flags see flags in lwarc_linearize
+ *
+ * @return a newly allocated LWMLINE
+ */
+static LWMLINE *
+lwmcurve_linearize(const LWMCURVE *mcurve, double tol,
+                    LW_LINEARIZE_TOLERANCE_TYPE type,
+                    int flags)
 {
 	LWMLINE *ogeom;
 	LWGEOM **lines;
 	int i;
 
-	LWDEBUGF(2, "lwmcurve_stroke called, geoms=%d, dim=%d.", mcurve->ngeoms, FLAGS_NDIMS(mcurve->flags));
+	LWDEBUGF(2, "lwmcurve_linearize called, geoms=%d, dim=%d.", mcurve->ngeoms, FLAGS_NDIMS(mcurve->flags));
 
 	lines = lwalloc(sizeof(LWGEOM *)*mcurve->ngeoms);
 
@@ -345,7 +506,7 @@ lwmcurve_stroke(const LWMCURVE *mcurve, uint32_t perQuad)
 		const LWGEOM *tmp = mcurve->geoms[i];
 		if (tmp->type == CIRCSTRINGTYPE)
 		{
-			lines[i] = (LWGEOM *)lwcircstring_stroke((LWCIRCSTRING *)tmp, perQuad);
+			lines[i] = (LWGEOM *)lwcircstring_linearize((LWCIRCSTRING *)tmp, tol, type, flags);
 		}
 		else if (tmp->type == LINETYPE)
 		{
@@ -353,7 +514,7 @@ lwmcurve_stroke(const LWMCURVE *mcurve, uint32_t perQuad)
 		}
 		else if (tmp->type == COMPOUNDTYPE)
 		{
-			lines[i] = (LWGEOM *)lwcompound_stroke((LWCOMPOUND *)tmp, perQuad);
+			lines[i] = (LWGEOM *)lwcompound_linearize((LWCOMPOUND *)tmp, tol, type, flags);
 		}
 		else
 		{
@@ -366,8 +527,18 @@ lwmcurve_stroke(const LWMCURVE *mcurve, uint32_t perQuad)
 	return ogeom;
 }
 
-LWMPOLY *
-lwmsurface_stroke(const LWMSURFACE *msurface, uint32_t perQuad)
+/**
+ * @param msurface input multi surface
+ * @param tol tolerance, semantic driven by tolerance_type
+ * @param tolerance_type see LW_LINEARIZE_TOLERANCE_TYPE
+ * @param flags see flags in lwarc_linearize
+ *
+ * @return a newly allocated LWMPOLY
+ */
+static LWMPOLY *
+lwmsurface_linearize(const LWMSURFACE *msurface, double tol,
+                      LW_LINEARIZE_TOLERANCE_TYPE type,
+                      int flags)
 {
 	LWMPOLY *ogeom;
 	LWGEOM *tmp;
@@ -376,7 +547,7 @@ lwmsurface_stroke(const LWMSURFACE *msurface, uint32_t perQuad)
 	POINTARRAY **ptarray;
 	int i, j;
 
-	LWDEBUG(2, "lwmsurface_stroke called.");
+	LWDEBUG(2, "lwmsurface_linearize called.");
 
 	polys = lwalloc(sizeof(LWGEOM *)*msurface->ngeoms);
 
@@ -385,7 +556,7 @@ lwmsurface_stroke(const LWMSURFACE *msurface, uint32_t perQuad)
 		tmp = msurface->geoms[i];
 		if (tmp->type == CURVEPOLYTYPE)
 		{
-			polys[i] = (LWGEOM *)lwcurvepoly_stroke((LWCURVEPOLY *)tmp, perQuad);
+			polys[i] = (LWGEOM *)lwcurvepoly_linearize((LWCURVEPOLY *)tmp, tol, type, flags);
 		}
 		else if (tmp->type == POLYGONTYPE)
 		{
@@ -402,15 +573,25 @@ lwmsurface_stroke(const LWMSURFACE *msurface, uint32_t perQuad)
 	return ogeom;
 }
 
-LWCOLLECTION *
-lwcollection_stroke(const LWCOLLECTION *collection, uint32_t perQuad)
+/**
+ * @param collection input geometry collection
+ * @param tol tolerance, semantic driven by tolerance_type
+ * @param tolerance_type see LW_LINEARIZE_TOLERANCE_TYPE
+ * @param flags see flags in lwarc_linearize
+ *
+ * @return a newly allocated LWCOLLECTION
+ */
+static LWCOLLECTION *
+lwcollection_linearize(const LWCOLLECTION *collection, double tol,
+                    LW_LINEARIZE_TOLERANCE_TYPE type,
+                    int flags)
 {
 	LWCOLLECTION *ocol;
 	LWGEOM *tmp;
 	LWGEOM **geoms;
 	int i;
 
-	LWDEBUG(2, "lwcollection_stroke called.");
+	LWDEBUG(2, "lwcollection_linearize called.");
 
 	geoms = lwalloc(sizeof(LWGEOM *)*collection->ngeoms);
 
@@ -420,18 +601,18 @@ lwcollection_stroke(const LWCOLLECTION *collection, uint32_t perQuad)
 		switch (tmp->type)
 		{
 		case CIRCSTRINGTYPE:
-			geoms[i] = (LWGEOM *)lwcircstring_stroke((LWCIRCSTRING *)tmp, perQuad);
+			geoms[i] = (LWGEOM *)lwcircstring_linearize((LWCIRCSTRING *)tmp, tol, type, flags);
 			break;
 		case COMPOUNDTYPE:
-			geoms[i] = (LWGEOM *)lwcompound_stroke((LWCOMPOUND *)tmp, perQuad);
+			geoms[i] = (LWGEOM *)lwcompound_linearize((LWCOMPOUND *)tmp, tol, type, flags);
 			break;
 		case CURVEPOLYTYPE:
-			geoms[i] = (LWGEOM *)lwcurvepoly_stroke((LWCURVEPOLY *)tmp, perQuad);
+			geoms[i] = (LWGEOM *)lwcurvepoly_linearize((LWCURVEPOLY *)tmp, tol, type, flags);
 			break;
 		case MULTICURVETYPE:
 		case MULTISURFACETYPE:
 		case COLLECTIONTYPE:
-			geoms[i] = (LWGEOM *)lwcollection_stroke((LWCOLLECTION *)tmp, perQuad);
+			geoms[i] = (LWGEOM *)lwcollection_linearize((LWCOLLECTION *)tmp, tol, type, flags);
 			break;
 		default:
 			geoms[i] = lwgeom_clone(tmp);
@@ -443,33 +624,42 @@ lwcollection_stroke(const LWCOLLECTION *collection, uint32_t perQuad)
 }
 
 LWGEOM *
-lwgeom_stroke(const LWGEOM *geom, uint32_t perQuad)
+lwcurve_linearize(const LWGEOM *geom, double tol,
+                  LW_LINEARIZE_TOLERANCE_TYPE type,
+                  int flags)
 {
 	LWGEOM * ogeom = NULL;
 	switch (geom->type)
 	{
 	case CIRCSTRINGTYPE:
-		ogeom = (LWGEOM *)lwcircstring_stroke((LWCIRCSTRING *)geom, perQuad);
+		ogeom = (LWGEOM *)lwcircstring_linearize((LWCIRCSTRING *)geom, tol, type, flags);
 		break;
 	case COMPOUNDTYPE:
-		ogeom = (LWGEOM *)lwcompound_stroke((LWCOMPOUND *)geom, perQuad);
+		ogeom = (LWGEOM *)lwcompound_linearize((LWCOMPOUND *)geom, tol, type, flags);
 		break;
 	case CURVEPOLYTYPE:
-		ogeom = (LWGEOM *)lwcurvepoly_stroke((LWCURVEPOLY *)geom, perQuad);
+		ogeom = (LWGEOM *)lwcurvepoly_linearize((LWCURVEPOLY *)geom, tol, type, flags);
 		break;
 	case MULTICURVETYPE:
-		ogeom = (LWGEOM *)lwmcurve_stroke((LWMCURVE *)geom, perQuad);
+		ogeom = (LWGEOM *)lwmcurve_linearize((LWMCURVE *)geom, tol, type, flags);
 		break;
 	case MULTISURFACETYPE:
-		ogeom = (LWGEOM *)lwmsurface_stroke((LWMSURFACE *)geom, perQuad);
+		ogeom = (LWGEOM *)lwmsurface_linearize((LWMSURFACE *)geom, tol, type, flags);
 		break;
 	case COLLECTIONTYPE:
-		ogeom = (LWGEOM *)lwcollection_stroke((LWCOLLECTION *)geom, perQuad);
+		ogeom = (LWGEOM *)lwcollection_linearize((LWCOLLECTION *)geom, tol, type, flags);
 		break;
 	default:
 		ogeom = lwgeom_clone(geom);
 	}
 	return ogeom;
+}
+
+/* Kept for backward compatibility - TODO: drop */
+LWGEOM *
+lwgeom_stroke(const LWGEOM *geom, uint32_t perQuad)
+{
+	return lwcurve_linearize(geom, perQuad, LW_LINEARIZE_TOLERANCE_TYPE_SEGS_PER_QUAD, 0);
 }
 
 /**
@@ -516,9 +706,9 @@ static int pt_continues_arc(const POINT4D *a1, const POINT4D *a2, const POINT4D 
 	b_distance = distance2d_pt_pt(tb, &center);
 	diff = fabs(radius - b_distance);
 	LWDEBUGF(4, "circle_radius=%g, b_distance=%g, diff=%g, percentage=%g", radius, b_distance, diff, diff/radius);
-	
+
 	/* Is the point b on the circle? */
-	if ( diff < EPSILON_SQLMM ) 
+	if ( diff < EPSILON_SQLMM )
 	{
 		int a2_side = lw_segment_side(t1, t3, t2);
 		int b_side  = lw_segment_side(t1, t3, tb);
@@ -528,7 +718,7 @@ static int pt_continues_arc(const POINT4D *a1, const POINT4D *a2, const POINT4D 
 		/* Is the angle similar to the previous one ? */
 		diff = fabs(angle1 - angle2);
 		LWDEBUGF(4, " angle1: %g, angle2: %g, diff:%g", angle1, angle2, diff);
-		if ( diff > EPSILON_SQLMM ) 
+		if ( diff > EPSILON_SQLMM )
 		{
 			return LW_FALSE;
 		}
@@ -551,7 +741,7 @@ linestring_from_pa(const POINTARRAY *pa, int srid, int start, int end)
 	for( i = start; i < end + 2; i++ )
 	{
 		getPoint4d_p(pa, i, &p);
-		ptarray_set_point4d(pao, j++, &p);	
+		ptarray_set_point4d(pao, j++, &p);
 	}
 	return lwline_as_lwgeom(lwline_construct(srid, NULL, pao));
 }
@@ -559,16 +749,16 @@ linestring_from_pa(const POINTARRAY *pa, int srid, int start, int end)
 static LWGEOM*
 circstring_from_pa(const POINTARRAY *pa, int srid, int start, int end)
 {
-	
+
 	POINT4D p0, p1, p2;
 	POINTARRAY *pao = ptarray_construct(ptarray_has_z(pa), ptarray_has_m(pa), 3);
 	LWDEBUGF(4, "srid=%d, start=%d, end=%d", srid, start, end);
 	getPoint4d_p(pa, start, &p0);
-	ptarray_set_point4d(pao, 0, &p0);	
+	ptarray_set_point4d(pao, 0, &p0);
 	getPoint4d_p(pa, (start+end+1)/2, &p1);
-	ptarray_set_point4d(pao, 1, &p1);	
+	ptarray_set_point4d(pao, 1, &p1);
 	getPoint4d_p(pa, end+1, &p2);
-	ptarray_set_point4d(pao, 2, &p2);	
+	ptarray_set_point4d(pao, 2, &p2);
 	return lwcircstring_as_lwgeom(lwcircstring_construct(srid, NULL, pao));
 }
 
@@ -605,19 +795,19 @@ pta_unstroke(const POINTARRAY *points, int type, int srid)
 	/* Null on empty input? */
 	if ( points->npoints == 0 )
 		return NULL;
-	
+
 	/* We can't desegmentize anything shorter than four points */
 	if ( points->npoints < 4 )
 	{
 		/* Return a linestring here*/
 		lwerror("pta_unstroke needs implementation for npoints < 4");
 	}
-	
+
 	/* Allocate our result array of vertices that are part of arcs */
 	num_edges = points->npoints - 1;
 	edges_in_arcs = lwalloc(num_edges + 1);
 	memset(edges_in_arcs, 0, num_edges + 1);
-	
+
 	/* We make a candidate arc of the first two edges, */
 	/* And then see if the next edge follows it */
 	while( i < num_edges-2 )
@@ -675,7 +865,7 @@ pta_unstroke(const POINTARRAY *points, int type, int srid)
 				lw_arc_center((POINT2D*)&first, (POINT2D*)&b, (POINT2D*)&a1, (POINT2D*)&center);
 				angle = lw_arc_angle((POINT2D*)&first, (POINT2D*)&center, (POINT2D*)&b);
         int p2_side = lw_segment_side((POINT2D*)&first, (POINT2D*)&a1, (POINT2D*)&b);
-        if ( p2_side >= 0 ) angle = -angle; 
+        if ( p2_side >= 0 ) angle = -angle;
 
 				if ( angle < 0 ) angle = 2 * M_PI + angle;
 				num_quadrants = ( 4 * angle ) / ( 2 * M_PI );
@@ -697,7 +887,7 @@ pta_unstroke(const POINTARRAY *points, int type, int srid)
 			i = i+1;
 		}
 	}
-	
+
 #if POSTGIS_DEBUG_LEVEL > 3
 	{
 		char *edgestr = lwalloc(num_edges+1);
@@ -732,7 +922,7 @@ pta_unstroke(const POINTARRAY *points, int type, int srid)
 	/* Roll out last item */
 	end = num_edges - 1;
 	lwcollection_add_lwgeom(outcol, geom_from_pa(points, srid, edge_type, start, end));
-	
+
 	/* Strip down to singleton if only one entry */
 	if ( outcol->ngeoms == 1 )
 	{
@@ -810,7 +1000,7 @@ lwmline_unstroke(const LWMLINE *mline)
 	return (LWGEOM *)lwcollection_construct(MULTICURVETYPE, mline->srid, NULL, mline->ngeoms, geoms);
 }
 
-LWGEOM * 
+LWGEOM *
 lwmpolygon_unstroke(const LWMPOLY *mpoly)
 {
 	LWGEOM **geoms;
